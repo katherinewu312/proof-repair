@@ -1,8 +1,67 @@
-# APRIL proof repair
+# Proof repair
 
 This project uses Hugging Face Transformers for Qwen inference and training and
 PEFT for LoRA adapters. Lean candidates are evaluated independently with the
 pinned project in `verifier/`.
+
+## Lean environment
+
+Lean is installed through `elan`, the Lean toolchain manager. Elan reads each
+directory's `lean-toolchain` file and automatically uses the version pinned by
+that project.
+
+First make sure `git` and `curl` are installed. On macOS or Linux, install elan
+with:
+
+```bash
+curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
+source "$HOME/.elan/env"
+```
+
+Choose the default installation when prompted. On Windows, follow the official
+[Lean installation instructions](https://lean-lang.org/install/) or install
+elan from PowerShell as described in the
+[manual installation guide](https://lean-lang.org/install/manual/).
+
+For interactive proof development, install VS Code and the official **Lean 4**
+extension published by `leanprover`.
+
+Confirm that the command-line tools are available:
+
+```bash
+elan --version
+lean --version
+lake --version
+```
+
+From the repository root, install the root project's pinned Lean 4.28 and
+Mathlib environment:
+
+```bash
+lake update
+lake exe cache get
+```
+
+Compile the example file through Lake so that Lean can find Mathlib:
+
+```bash
+lake env lean proofs.lean
+```
+
+Do not invoke `lean proofs.lean` directly; doing so can produce an `unknown
+module prefix 'Mathlib'` error because it bypasses the project's Lake
+environment.
+
+APRIL examples are checked in a separate verifier pinned to Lean 4.22.0-rc4.
+Install that environment independently:
+
+```bash
+cd verifier
+lake update
+lake exe cache get
+lake env lean --version
+cd ..
+```
 
 ## Python environment
 
