@@ -1,0 +1,6 @@
+torch>=2.6
+transformers>=5,<6
+peft>=0.20,<1
+accelerate>=1.10,<2
+huggingface_hub[cli]>=0.30,<2
+PyYAML>=6,<7

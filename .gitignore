@@ -1,0 +1,33 @@
+# Python environment and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Downloaded model weights
+models/
+
+# Training, generation, and evaluation outputs
+runs/
+
+# Downloaded/generated datasets
+data/raw/
+data/benchmark/
+data/sft/
+data/verification/
+
+# Lean build artifacts
+.lake/
+verifier/.lake/
+*.olean
+*.ilean
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
