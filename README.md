@@ -135,3 +135,25 @@ python scripts/evaluate_predictions.py \
 ```
 
 Use the corresponding `runs/fine_tuned/` paths for the adapter run.
+
+## Downloading the APRIL dataset
+```bash
+mkdir -p data/raw/april
+
+hf download uw-math-ai/APRIL \
+  train/tme_train.jsonl \
+  val/tme_val.jsonl \
+  test/tme_test.jsonl \
+  --repo-type dataset \
+  --local-dir data/raw/april
+```
+
+This should produce:
+```
+data/raw/april/
+├── train/tme_train.jsonl
+├── val/tme_val.jsonl
+└── test/tme_test.jsonl
+```
+
+APRIL currently has about 59,667 TME training rows, 2,064 validation rows, and 398 test rows. Each row contains `incorrect_proof`, `correct_proof`, `error`, `state_at_error`, `src_hash`, and other metadata.
