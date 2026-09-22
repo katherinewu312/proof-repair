@@ -17,6 +17,7 @@ runs/
 data/raw/
 data/benchmark/
 data/sft/
+data/sft-smoke/
 data/verification/
 
 # Lean build artifacts

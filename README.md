@@ -72,21 +72,179 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-## Download the Hugging Face model
+## Download and prepare APRIL dataset
 
-The old converted 4-bit checkpoint is not compatible with this training stack.
+Download the TME portions of the APRIL dataset:
+
+```bash
+mkdir -p data/raw/april
+
+hf download uw-math-ai/APRIL \
+  train/tme_train.jsonl \
+  val/tme_val.jsonl \
+  test/tme_test.jsonl \
+  --repo-type dataset \
+  --local-dir data/raw/april
+```
+
+This produces:
+
+```text
+data/raw/april/
+├── train/tme_train.jsonl
+├── val/tme_val.jsonl
+└── test/tme_test.jsonl
+```
+
+Create the deterministic 500/100/100 benchmark and chat-format SFT files:
+
+```bash
+python scripts/prepare_data.py
+```
+
+Before training, compile-audit the selected examples with the pinned APRIL
+verifier:
+
+```bash
+python scripts/verify_dataset.py --workers 1
+```
+
+## SIMPLE MODEL
+
+This uses Qwen3-0.6B, 16 training examples, 4
+validation examples, one epoch, 512-token sequences, and a rank-8 LoRA adapter.
+
+### 1. Download the model
+
 Download the standard Hugging Face checkpoint without converting it:
 
 ```bash
 mkdir -p models
+hf download Qwen/Qwen3-0.6B \
+  --local-dir models/Qwen3-0.6B
+```
+
+### 2. Create the dataset
+
+The full sampled data remains unchanged under `data/sft/`. Create a separate,
+deterministic subset for the smoke test:
+
+```bash
+mkdir -p data/sft-smoke
+
+head -n 16 data/sft/train.jsonl \
+  > data/sft-smoke/train.jsonl
+
+head -n 4 data/sft/valid.jsonl \
+  > data/sft-smoke/valid.jsonl
+```
+
+Confirm the counts:
+
+```bash
+wc -l data/sft-smoke/*.jsonl
+```
+
+Expected result:
+
+```text
+16 data/sft-smoke/train.jsonl
+ 4 data/sft-smoke/valid.jsonl
+20 total
+```
+
+The generated `data/sft-smoke/` directory is ignored by Git.
+
+### 3. Train the adapter
+
+The settings are stored in `configs/qwen3_tme_lora_smoke.yaml`:
+
+```bash
+python scripts/train.py \
+  --config configs/qwen3_tme_lora_smoke.yaml
+```
+
+The final PEFT adapter is written to:
+
+```text
+runs/tme_lora_smoke_hf/adapters/
+```
+
+Check that it was created:
+
+```bash
+ls -lh runs/tme_lora_smoke_hf/adapters
+```
+
+### 4. Generate the zero-shot baseline
+
+```bash
+python scripts/generate.py \
+  --model models/Qwen3-0.6B \
+  --input data/sft/test.jsonl \
+  --output runs/smoke_zero_shot/predictions.jsonl \
+  --max-tokens 1024
+```
+
+`generate.py` currently expects all 100 test examples. It saves every response
+immediately, so the command can be stopped with `Ctrl-C` and resumed by running
+the identical command again.
+
+### 5. Compile the zero-shot repairs
+
+After all 100 predictions have been generated:
+
+```bash
+python scripts/evaluate_predictions.py \
+  --predictions runs/smoke_zero_shot/predictions.jsonl \
+  --results runs/smoke_zero_shot/compilation_results.jsonl \
+  --summary runs/smoke_zero_shot/score.json \
+  --expected 100
+```
+
+### 6. Generate with the smoke-test adapter
+
+```bash
+python scripts/generate.py \
+  --model models/Qwen3-0.6B \
+  --adapter-path runs/tme_lora_smoke_hf/adapters \
+  --input data/sft/test.jsonl \
+  --output runs/smoke_fine_tuned/predictions.jsonl \
+  --max-tokens 1024
+```
+
+### 7. Compile the fine-tuned repairs
+
+```bash
+python scripts/evaluate_predictions.py \
+  --predictions runs/smoke_fine_tuned/predictions.jsonl \
+  --results runs/smoke_fine_tuned/compilation_results.jsonl \
+  --summary runs/smoke_fine_tuned/score.json \
+  --expected 100
+```
+
+Compare the resulting scores:
+
+```text
+runs/smoke_zero_shot/score.json
+runs/smoke_fine_tuned/score.json
+```
+
+ <!--
+## Full Qwen3-4B experiment
+
+The old converted MLX 4-bit checkpoint is not compatible with this Transformers
+and PEFT training stack. Download the standard Hugging Face checkpoint:
+
+```bash
 hf download Qwen/Qwen3-4B-Instruct-2507 \
   --local-dir models/Qwen3-4B-Instruct-2507
 ```
 
-You may alternatively pass the Hub ID `Qwen/Qwen3-4B-Instruct-2507` directly to
-the scripts, but a local directory makes runs reproducible after downloading.
+This experiment is substantially more demanding than the smoke test and may
+not fit comfortably in 16 GB of unified memory.
 
-## Fine-tune a PEFT LoRA adapter
+### Fine-tune a PEFT LoRA adapter
 
 ```bash
 python scripts/train.py --config configs/qwen3_tme_lora.yaml
@@ -99,7 +257,7 @@ The configured 2,048-token limit matches the previous experiment. The trainer
 prints how many rows were truncated and reserves supervised repair tokens when
 a prompt is longer than the available context window.
 
-## Generate repairs
+### Generate repairs
 
 Zero-shot baseline:
 
@@ -125,7 +283,7 @@ python scripts/generate.py \
 Both commands use greedy decoding, save each response immediately, and resume
 from existing prediction files.
 
-## Compile generated repairs
+### Compile generated repairs
 
 ```bash
 python scripts/evaluate_predictions.py \
@@ -135,25 +293,4 @@ python scripts/evaluate_predictions.py \
 ```
 
 Use the corresponding `runs/fine_tuned/` paths for the adapter run.
-
-## Downloading the APRIL dataset
-```bash
-mkdir -p data/raw/april
-
-hf download uw-math-ai/APRIL \
-  train/tme_train.jsonl \
-  val/tme_val.jsonl \
-  test/tme_test.jsonl \
-  --repo-type dataset \
-  --local-dir data/raw/april
-```
-
-This should produce:
-```
-data/raw/april/
-├── train/tme_train.jsonl
-├── val/tme_val.jsonl
-└── test/tme_test.jsonl
-```
-
-APRIL currently has about 59,667 TME training rows, 2,064 validation rows, and 398 test rows. Each row contains `incorrect_proof`, `correct_proof`, `error`, `state_at_error`, `src_hash`, and other metadata.
+-->

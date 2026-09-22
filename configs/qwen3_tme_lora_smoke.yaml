@@ -1,0 +1,36 @@
+model_name_or_path: "models/Qwen3-0.6B"
+data_dir: "data/sft-smoke"
+output_dir: "runs/tme_lora_smoke_hf"
+final_adapter_dir: "runs/tme_lora_smoke_hf/adapters"
+
+seed: 20260921
+device: "auto"
+dtype: "bfloat16"
+
+num_train_epochs: 1
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 1.0e-4
+weight_decay: 0.01
+warmup_ratio: 0.10
+lr_scheduler_type: "cosine"
+
+max_seq_length: 512
+min_response_tokens: 128
+gradient_checkpointing: true
+
+logging_steps: 1
+eval_steps: 8
+save_steps: 8
+save_total_limit: 2
+
+lora:
+  rank: 8
+  alpha: 16
+  dropout: 0.1
+  target_modules:
+    - "q_proj"
+    - "v_proj"
+
+report_to: "none"
