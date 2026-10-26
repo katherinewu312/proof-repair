@@ -18,8 +18,8 @@ from prepare_data import DEFAULT_SEED, canonical_row, to_sft_chat, write_json, w
 
 
 SPLITS = (
-    ("train", "train/tme_train.jsonl", 500),
-    ("valid", "val/tme_val.jsonl", 100),
+    ("train", "train/tme_train.jsonl", 16),
+    ("valid", "val/tme_val.jsonl", 4),
     ("test", "test/tme_test.jsonl", 100),
 )
 
@@ -392,7 +392,8 @@ def main() -> int:
     manifest_path = args.benchmark_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    for split_name, raw_relative, target_count in SPLITS:
+    for split_name, raw_relative, _ in SPLITS:
+        target_count = manifest["splits"][split_name]["selected_count"]
         benchmark_path = args.benchmark_dir / f"{split_name}.jsonl"
         initial = jsonl_rows(benchmark_path)
         if len(initial) != target_count:

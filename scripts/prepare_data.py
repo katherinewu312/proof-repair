@@ -20,8 +20,8 @@ SYSTEM_PROMPT = (
 )
 
 SPLITS = (
-    ("train", "train/tme_train.jsonl", 500),
-    ("valid", "val/tme_val.jsonl", 100),
+    ("train", "train/tme_train.jsonl", 16),
+    ("valid", "val/tme_val.jsonl", 4),
     ("test", "test/tme_test.jsonl", 100),
 )
 
@@ -65,7 +65,16 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SEED,
         help="Random seed (default: %(default)s)",
     )
-    return parser.parse_args()
+    for name, _, default_count in SPLITS:
+        parser.add_argument(
+            f"--{name}-size", type=int, default=default_count,
+            help=f"Number of {name} examples (default: %(default)s)",
+        )
+    args = parser.parse_args()
+    for name, _, _ in SPLITS:
+        if getattr(args, f"{name}_size") <= 0:
+            parser.error(f"--{name}-size must be positive")
+    return args
 
 
 def sha256_file(path: Path) -> str:
@@ -222,7 +231,7 @@ def main() -> int:
     for output_name, relative_input, sample_count in SPLITS:
         input_path = args.input_dir / relative_input
         row_count, groups = load_and_group(input_path, output_name)
-        selected = select_rows(groups, sample_count, output_name, rng)
+        selected = select_rows(groups, getattr(args, f"{output_name}_size"), output_name, rng)
 
         benchmark_path = args.benchmark_dir / f"{output_name}.jsonl"
         sft_path = args.sft_dir / f"{output_name}.jsonl"

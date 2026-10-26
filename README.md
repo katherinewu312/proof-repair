@@ -74,7 +74,7 @@ python -m pip install -r requirements.txt
 
 ## Download and prepare APRIL dataset
 
-Download the TME (Tactic mutation error) portions of the APRIL dataset:
+Download the APRIL dataset. For example, for the TME (Tactic mutation error) portion of the dataset, run:
 
 ```bash
 mkdir -p data/raw/april
@@ -96,14 +96,24 @@ data/raw/april/
 └── test/tme_test.jsonl
 ```
 
-Create the deterministic 500/100/100 benchmark and chat-format SFT files:
+Create the training / validation / test examples directly from the raw data, including chat-format SFT files:
 
 ```bash
 python scripts/prepare_data.py
 ```
 
-Before training, compile-audit the selected examples with the pinned APRIL
-verifier:
+The outputs are `data/benchmark/{train,valid,test}.jsonl` (original records),
+`data/sft/{train,valid,test}.jsonl` (chat format), and
+`data/benchmark/manifest.json` (selection metadata). Rerunning preparation
+replaces these files.
+
+The default split size is 16 training / 4 validation / 100 test. To choose different split sizes, pass:
+
+```bash
+python scripts/prepare_data.py --train-size 32 --valid-size 8 --test-size 50
+```
+
+Before training, verify that each reference proof compiles and each broken proof fails. Examples that fail these checks are replaced with verified examples from the raw dataset, keeping the requested training, validation, and test sizes unchanged:
 
 ```bash
 python scripts/verify_dataset.py --workers 1
@@ -124,108 +134,84 @@ hf download Qwen/Qwen3-0.6B \
   --local-dir models/Qwen3-0.6B
 ```
 
-### 2. Create the dataset
+### 2. Train the adapter
 
-The full sampled data remains unchanged under `data/sft/`. Create a separate,
-deterministic subset for the smoke test:
-
-```bash
-mkdir -p data/sft-smoke
-
-head -n 16 data/sft/train.jsonl \
-  > data/sft-smoke/train.jsonl
-
-head -n 4 data/sft/valid.jsonl \
-  > data/sft-smoke/valid.jsonl
-```
-
-Confirm the counts:
-
-```bash
-wc -l data/sft-smoke/*.jsonl
-```
-
-Expected result:
-
-```text
-16 data/sft-smoke/train.jsonl
- 4 data/sft-smoke/valid.jsonl
-20 total
-```
-
-The generated `data/sft-smoke/` directory is ignored by Git.
-
-### 3. Train the adapter
-
-The settings are stored in `configs/qwen3_tme_lora_smoke.yaml`:
+Training reads the prepared `data/sft/` files directly. The settings are stored
+in `configs/qwen3_tme_lora.yaml`:
 
 ```bash
 python scripts/train.py \
-  --config configs/qwen3_tme_lora_smoke.yaml
+  --config configs/qwen3_tme_lora.yaml
 ```
 
 The final PEFT adapter is written to:
 
 ```text
-runs/tme_lora_smoke_hf/adapters/
+runs/tme_lora/adapters/
 ```
 
 Check that it was created:
 
 ```bash
-ls -lh runs/tme_lora_smoke_hf/adapters
+ls -lh runs/tme_lora/adapters
 ```
 
-### 4. Generate the zero-shot baseline
+### 3. Generate repairs with the Base model (zero-shot)
 
 ```bash
 python scripts/generate.py \
   --model models/Qwen3-0.6B \
   --input data/sft/test.jsonl \
-  --output runs/smoke_zero_shot/predictions.jsonl \
+  --output runs/zero_shot/predictions.jsonl \
   --max-tokens 1024
 ```
 
-`generate.py` currently expects all 100 test examples. It saves every response
+`generate.py` processes all examples in the input file. It saves every response
 immediately, so the command can be stopped with `Ctrl-C` and resumed by running
 the identical command again.
 
-### 5. Compile the zero-shot repairs
+### 4. Compile repairs from the Base model (zero-shot)
 
 After all 100 predictions have been generated:
 
 ```bash
 python scripts/evaluate_predictions.py \
-  --predictions runs/smoke_zero_shot/predictions.jsonl \
-  --results runs/smoke_zero_shot/compilation_results.jsonl \
-  --summary runs/smoke_zero_shot/score.json \
+  --predictions runs/zero_shot/predictions.jsonl \
+  --results runs/zero_shot/compilation_results.jsonl \
+  --summary runs/zero_shot/score.json \
   --expected 100
 ```
 
-### 6. Generate with the smoke-test adapter
+### 5. Generate repairs with the LoRA fine-tuned model
 
 ```bash
 python scripts/generate.py \
   --model models/Qwen3-0.6B \
-  --adapter-path runs/tme_lora_smoke_hf/adapters \
+  --adapter-path runs/tme_lora/adapters \
   --input data/sft/test.jsonl \
-  --output runs/smoke_fine_tuned/predictions.jsonl \
+  --output runs/fine_tuned/predictions.jsonl \
   --max-tokens 1024
 ```
 
-### 7. Compile the fine-tuned repairs
+### 6. Compile repairs from the LoRA fine-tuned model
 
 ```bash
 python scripts/evaluate_predictions.py \
-  --predictions runs/smoke_fine_tuned/predictions.jsonl \
-  --results runs/smoke_fine_tuned/compilation_results.jsonl \
-  --summary runs/smoke_fine_tuned/score.json \
+  --predictions runs/fine_tuned/predictions.jsonl \
+  --results runs/fine_tuned/compilation_results.jsonl \
+  --summary runs/fine_tuned/score.json \
   --expected 100
 ```
 
-Compare the resulting scores:
+Compare the Base model and LoRA fine-tuned model scores below.
+Both use the same prompt format, the LoRA fine-tuned model also loads the
+trained adapter:
 
 ```text
-runs/smoke_zero_shot/score.json
-runs/smoke_fine_tuned/score.json
+runs/zero_shot/score.json
+runs/fine_tuned/score.json
 ```
+
+If you change `--test-size`, set `--expected` in both evaluation commands to
+that same size. (Use new run output directories after changing the dataset so
+previous predictions and adapters remain associated with their original data.)

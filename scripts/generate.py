@@ -195,8 +195,8 @@ def main() -> int:
         raise FileNotFoundError(args.adapter_path)
 
     rows = read_jsonl(args.input)
-    if len(rows) != 100:
-        raise ValueError(f"Expected exactly 100 test prompts, found {len(rows)}")
+    if not rows:
+        raise ValueError("No test prompts found")
     prompt_messages = {
         row["selected_id"]: inference_messages(row) for row in rows
     }
@@ -225,7 +225,7 @@ def main() -> int:
     if unknown:
         raise ValueError(f"Predictions contain IDs absent from test set: {sorted(unknown)}")
     pending = [row for row in rows if row["selected_id"] not in completed]
-    print(f"Resuming with {len(completed)}/100 complete; {len(pending)} remaining", flush=True)
+    print(f"Resuming with {len(completed)}/{len(rows)} complete; {len(pending)} remaining", flush=True)
     if not pending:
         print(f"All predictions already exist in {args.output}", flush=True)
         return 0
@@ -257,7 +257,7 @@ def main() -> int:
     for index, row in enumerate(rows, start=1):
         selected_id = row["selected_id"]
         if selected_id in completed:
-            print(f"[{index}/100] {selected_id}: cached", flush=True)
+            print(f"[{index}/{len(rows)}] {selected_id}: cached", flush=True)
             continue
 
         messages = prompt_messages[selected_id]
@@ -304,12 +304,12 @@ def main() -> int:
         append_jsonl(args.output, prediction)
         completed[selected_id] = prediction
         print(
-            f"[{index}/100] {selected_id}: saved "
+            f"[{index}/{len(rows)}] {selected_id}: saved "
             f"({len(candidate)} chars, {elapsed:.1f}s)",
             flush=True,
         )
 
-    print(f"Saved 100/100 predictions to {args.output}", flush=True)
+    print(f"Saved {len(rows)}/{len(rows)} predictions to {args.output}", flush=True)
     return 0
 
 
