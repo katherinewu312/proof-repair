@@ -1,14 +1,24 @@
 # Proof repair
 
 This project uses Hugging Face Transformers for Qwen inference and training and
-PEFT for LoRA adapters. Lean candidates are evaluated independently with the
-pinned project in `verifier/`.
+PEFT for LoRA adapters. Each dataset uses its own pinned Lean project for
+verification.
+
+- [OpenAI Math](#openai-math)
+- [APRIL](#april)
+
+Run the commands below from the repository root unless a command changes directory.
 
 ## Lean environment
 
 Lean is installed through `elan`, the Lean toolchain manager. Elan reads each
 directory's `lean-toolchain` file and automatically uses the version pinned by
 that project.
+
+The environments are independent: the root example uses Lean 4.28.0, APRIL
+uses Lean 4.22.0-rc4, and the current OpenAI Math checkout uses Lean 4.34.1.
+Always follow the `lean-toolchain` in the selected project; no global toolchain
+switch is needed. Dataset-specific setup appears in each workflow below.
 
 First make sure `git` and `curl` are installed. On macOS or Linux, install elan
 with:
@@ -52,6 +62,62 @@ Do not invoke `lean proofs.lean` directly; doing so can produce an `unknown
 module prefix 'Mathlib'` error because it bypasses the project's Lake
 environment.
 
+## Python environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+## OpenAI math dataset
+
+### 1. Download the Lean library
+
+Use a partial clone and sparse checkout to obtain `lean/`.
+
+```bash
+git clone --filter=blob:none --sparse \
+  https://github.com/openai/math.git external/openai-math
+
+git -C external/openai-math sparse-checkout set lean
+```
+
+### 2. Extract all Lean formalized results (~162?)
+
+`lean/formalization.yaml` contains all results that are formalized (and compile) in Lean. 
+
+```bash
+python scripts/extract_openai_math.py
+```
+
+The outputs are:
+
+- `data/raw/openai_math/originals.jsonl`: one record per extracted target.
+
+### 3. Set up the OpenAI Math Lean environment
+
+OpenAI Math uses its own `lean-toolchain`, Lake configuration, dependency lockfile,
+and compatibility patches (Lean 4.34.1).
+
+```bash
+cd external/openai-math/lean
+lake env lean --version
+lake update
+lake exe cache get
+cd ../../..
+```
+
+Elan obtains the pinned Lean toolchain when needed. 
+
+### 4. Mutations
+TODO
+
+## [APRIL](https://arxiv.org/pdf/2602.02990) (old)
+
+### Lean environment for APRIL
+
 APRIL examples are checked in a separate verifier pinned to Lean 4.22.0-rc4.
 Install that environment independently:
 
@@ -61,15 +127,6 @@ lake update
 lake exe cache get
 lake env lean --version
 cd ..
-```
-
-## Python environment
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
 ```
 
 ## Download and prepare APRIL dataset
@@ -99,7 +156,7 @@ data/raw/april/
 Create the training / validation / test examples directly from the raw data, including chat-format SFT files:
 
 ```bash
-python scripts/prepare_data.py
+python scripts/APRIL/prepare_data.py
 ```
 
 The outputs are `data/benchmark/{train,valid,test}.jsonl` (original records),
@@ -110,13 +167,13 @@ replaces these files.
 The default split size is 16 training / 4 validation / 100 test. To choose different split sizes, pass:
 
 ```bash
-python scripts/prepare_data.py --train-size 32 --valid-size 8 --test-size 50
+python scripts/APRIL/prepare_data.py --train-size 32 --valid-size 8 --test-size 50
 ```
 
 Before training, verify that each reference proof compiles and each broken proof fails. Examples that fail these checks are replaced with verified examples from the raw dataset, keeping the requested training, validation, and test sizes unchanged:
 
 ```bash
-python scripts/verify_dataset.py --workers 1
+python scripts/APRIL/verify_dataset.py --workers 1
 ```
 
 ## SIMPLE MODEL
@@ -158,6 +215,9 @@ ls -lh runs/tme_lora/adapters
 
 ### 3. Generate repairs with the Base model (zero-shot)
 
+Ask the base Qwen model to fix each broken proof and save its proposed Lean code
+to `predictions.jsonl`. These repairs have not yet been checked by Lean.
+
 ```bash
 python scripts/generate.py \
   --model models/Qwen3-0.6B \
@@ -172,6 +232,9 @@ the identical command again.
 
 ### 4. Compile repairs from the Base model (zero-shot)
 
+Run the proposed repairs through Lean to check which compile successfully and
+calculate the compilation success rate.
+
 After all 100 predictions have been generated:
 
 ```bash
@@ -184,6 +247,10 @@ python scripts/evaluate_predictions.py \
 
 ### 5. Generate repairs with the LoRA fine-tuned model
 
+Ask Qwen with the trained LoRA adapter to fix each broken proof and save its
+proposed Lean code to `predictions.jsonl`. These repairs have not yet been checked
+by Lean.
+
 ```bash
 python scripts/generate.py \
   --model models/Qwen3-0.6B \
@@ -194,6 +261,9 @@ python scripts/generate.py \
 ```
 
 ### 6. Compile repairs from the LoRA fine-tuned model
+
+Run the adapter-assisted repairs through Lean to check which compile successfully
+and calculate the compilation success rate.
 
 ```bash
 python scripts/evaluate_predictions.py \

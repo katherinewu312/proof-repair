@@ -18,6 +18,7 @@ data/raw/
 data/benchmark/
 data/sft/
 data/verification/
+external/
 
 # Lean build artifacts
 .lake/

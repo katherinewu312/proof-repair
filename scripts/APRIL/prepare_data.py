@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build a small, deterministic TME proof-repair benchmark from APRIL."""
+"""Samples APRIL TME examples and constructs SFT chat records.
+Currently, this is only specific to APRIL and to tactic mutation errors (TME)."""
 
 from __future__ import annotations
 
