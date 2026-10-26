@@ -74,7 +74,7 @@ python -m pip install -r requirements.txt
 
 ## Download and prepare APRIL dataset
 
-Download the TME portions of the APRIL dataset:
+Download the TME (Tactic mutation error) portions of the APRIL dataset:
 
 ```bash
 mkdir -p data/raw/april
@@ -229,68 +229,3 @@ Compare the resulting scores:
 runs/smoke_zero_shot/score.json
 runs/smoke_fine_tuned/score.json
 ```
-
- <!--
-## Full Qwen3-4B experiment
-
-The old converted MLX 4-bit checkpoint is not compatible with this Transformers
-and PEFT training stack. Download the standard Hugging Face checkpoint:
-
-```bash
-hf download Qwen/Qwen3-4B-Instruct-2507 \
-  --local-dir models/Qwen3-4B-Instruct-2507
-```
-
-This experiment is substantially more demanding than the smoke test and may
-not fit comfortably in 16 GB of unified memory.
-
-### Fine-tune a PEFT LoRA adapter
-
-```bash
-python scripts/train.py --config configs/qwen3_tme_lora.yaml
-```
-
-The final adapter is written to `runs/tme_lora/adapters`. Checkpoints used for
-resuming training remain under `runs/tme_lora/checkpoint-*`.
-
-The configured 2,048-token limit matches the previous experiment. The trainer
-prints how many rows were truncated and reserves supervised repair tokens when
-a prompt is longer than the available context window.
-
-### Generate repairs
-
-Zero-shot baseline:
-
-```bash
-python scripts/generate.py \
-  --model models/Qwen3-4B-Instruct-2507 \
-  --input data/sft/test.jsonl \
-  --output runs/zero_shot/predictions.jsonl \
-  --max-tokens 1024
-```
-
-Fine-tuned adapter:
-
-```bash
-python scripts/generate.py \
-  --model models/Qwen3-4B-Instruct-2507 \
-  --adapter-path runs/tme_lora/adapters \
-  --input data/sft/test.jsonl \
-  --output runs/fine_tuned/predictions.jsonl \
-  --max-tokens 1024
-```
-
-Both commands use greedy decoding, save each response immediately, and resume
-from existing prediction files.
-
-### Compile generated repairs
-
-```bash
-python scripts/evaluate_predictions.py \
-  --predictions runs/zero_shot/predictions.jsonl \
-  --results runs/zero_shot/compilation_results.jsonl \
-  --summary runs/zero_shot/score.json
-```
-
-Use the corresponding `runs/fine_tuned/` paths for the adapter run.
--->

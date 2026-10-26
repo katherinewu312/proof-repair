@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_MODEL = "models/Qwen3-4B-Instruct-2507"
+DEFAULT_MODEL = "models/Qwen3-0.6B"
 DEFAULT_INPUT = Path("data/sft/test.jsonl")
 DEFAULT_OUTPUT = Path("runs/zero_shot/predictions.jsonl")
 DEFAULT_MAX_TOKENS = 1024
