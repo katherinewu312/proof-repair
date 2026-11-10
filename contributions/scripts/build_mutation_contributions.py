@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build verified APRIL-format line-mutation contributions from OpenAI Math."""
+"""Build verified APRIL-format contributions using registered proof mutators."""
 from __future__ import annotations
 
 import argparse
@@ -14,70 +14,70 @@ import sys
 from typing import Any, Mapping, Sequence
 
 try:
-    from .april_formatter import (
+    from .april_formatter import format_april_record
+    from .proof_annotator import (
         ANNOTATION_PROMPT_VERSION,
         ANNOTATION_SYSTEM_PROMPT,
-        AprilProvenance,
         annotation_user_prompt,
-        format_april_record,
         parse_annotation,
     )
-    from .llm_client import DEFAULT_OPENAI_MODEL, PAPER_MODEL, OpenAIModel, sanitize_endpoint
     from .lean_verifier import LeanInteractVerifier, VerifierPool, verify_parallel
-    from .mutate_line import (
-        LME_PROMPT_VERSION,
-        MLME_PROMPT_VERSION,
-        SYSTEM_PROMPT,
-        MutationError,
-        lme_user_prompt,
-        messages,
-        mlme_user_prompt,
-        mutate_proof,
+    from .llm_client import (
+        DEFAULT_HUGGINGFACE_MODEL,
+        DEFAULT_OPENAI_MODEL,
+        PAPER_MODEL,
+        HuggingFaceLocalModel,
+        OpenAIModel,
+        sanitize_endpoint,
     )
-    from .mutation_utils import (
-        JsonlJournal,
-        atomic_json,
-        atomic_jsonl,
-        sha256_bytes,
-        sha256_text,
+    from .mutation_adapters import (
+        DEFAULT_MUTATORS,
+        MUTATOR_DESCRIPTORS,
+        build_adapter,
+        manifest_metadata,
     )
+    from .mutation_orchestrator import (
+        SEED_DERIVATION_VERSION,
+        MutationAdapter,
+        make_jobs,
+        mutation_job_id,
+    )
+    from .mutation_utils import JsonlJournal, atomic_json, atomic_jsonl, sha256_bytes, sha256_text
     from .proof_datasets import OpenAIMathDataset, default_openai_math_input
 except ImportError:  # Support direct execution from contributions/scripts.
-    from april_formatter import (
+    from april_formatter import format_april_record
+    from proof_annotator import (
         ANNOTATION_PROMPT_VERSION,
         ANNOTATION_SYSTEM_PROMPT,
-        AprilProvenance,
         annotation_user_prompt,
-        format_april_record,
         parse_annotation,
     )
-    from llm_client import DEFAULT_OPENAI_MODEL, PAPER_MODEL, OpenAIModel, sanitize_endpoint
     from lean_verifier import LeanInteractVerifier, VerifierPool, verify_parallel
-    from mutate_line import (
-        LME_PROMPT_VERSION,
-        MLME_PROMPT_VERSION,
-        SYSTEM_PROMPT,
-        MutationError,
-        lme_user_prompt,
-        messages,
-        mlme_user_prompt,
-        mutate_proof,
+    from llm_client import (
+        DEFAULT_HUGGINGFACE_MODEL,
+        DEFAULT_OPENAI_MODEL,
+        PAPER_MODEL,
+        HuggingFaceLocalModel,
+        OpenAIModel,
+        sanitize_endpoint,
     )
-    from mutation_utils import (
-        JsonlJournal,
-        atomic_json,
-        atomic_jsonl,
-        sha256_bytes,
-        sha256_text,
+    from mutation_adapters import (
+        DEFAULT_MUTATORS,
+        MUTATOR_DESCRIPTORS,
+        build_adapter,
+        manifest_metadata,
     )
+    from mutation_orchestrator import (
+        SEED_DERIVATION_VERSION,
+        MutationAdapter,
+        make_jobs,
+        mutation_job_id,
+    )
+    from mutation_utils import JsonlJournal, atomic_json, atomic_jsonl, sha256_bytes, sha256_text
     from proof_datasets import OpenAIMathDataset, default_openai_math_input
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def mutation_job_id(src_hash: str, error_type: str, attempt_index: int) -> str:
-    return f"{error_type}:{src_hash}:{attempt_index}"
 
 
 def record_rejection(journal: JsonlJournal, key: str, phase: str, reason: str) -> None:
@@ -89,26 +89,57 @@ def endpoint_from_args(args: argparse.Namespace) -> str | None:
     return args.base_url or os.environ.get(args.base_url_env)
 
 
+def model_endpoint(args: argparse.Namespace) -> str:
+    return "local" if args.model_provider == "huggingface" else sanitize_endpoint(endpoint_from_args(args))
+
+
+def model_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    path = args.work_dir / "model_metadata.json"
+    if path.is_file():
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            return value
+    return {
+        "provider": args.model_provider,
+        "model": args.model,
+        "requested_revision": args.hf_revision if args.model_provider == "huggingface" else None,
+        "resolved_revision": None,
+        "device": None,
+    }
+
+
+def expected_job_ids(rows: Sequence[Mapping[str, Any]], args: argparse.Namespace) -> list[str]:
+    return [
+        mutation_job_id(mutator_id, str(row["src_hash"]), attempt)
+        for row in rows
+        for mutator_id in args.mutators
+        for attempt in range(args.attempts_per_mutator)
+    ]
+
+
 def ensure_run_config(args: argparse.Namespace, rows: Sequence[Mapping[str, Any]]) -> None:
-    """Refuse to combine journals produced by incompatible experiments."""
     config = {
-        "protocol": "openai-math-line-mutations-v1",
+        "protocol": "openai-math-generic-mutations-v2",
         "input": str(args.input),
         "input_sha256": sha256_bytes(args.input.read_bytes()),
-        "selected_sources": sorted(row["src_hash"] for row in rows),
-        "selected_theorems": sorted(row["theorem"] for row in rows),
+        "selected_sources": sorted(str(row["src_hash"]) for row in rows),
+        "selected_theorems": sorted(str(row["theorem"]) for row in rows),
         "project_dir": str(args.project_dir),
         "verified_project": getattr(args, "verified_project", None),
         "seed": args.seed,
-        "mutation_types": sorted(args.mutation_types),
-        "attempts_per_proof": args.attempts_per_proof,
+        "seed_derivation": SEED_DERIVATION_VERSION,
+        "mutators": list(args.mutators),
+        "attempts_per_mutator": args.attempts_per_mutator,
+        "model_provider": args.model_provider,
         "model": args.model,
-        "endpoint": sanitize_endpoint(endpoint_from_args(args)),
+        "endpoint": model_endpoint(args),
+        "hf_device": args.hf_device if args.model_provider == "huggingface" else None,
+        "hf_revision": args.hf_revision if args.model_provider == "huggingface" else None,
         "reasoning_effort": args.reasoning_effort,
         "max_tokens": args.max_tokens,
         "annotation_max_tokens": args.annotation_max_tokens,
         "annotation_retries": args.annotation_retries,
-        "prompt_versions": [LME_PROMPT_VERSION, MLME_PROMPT_VERSION, ANNOTATION_PROMPT_VERSION],
+        "annotation_prompt_version": ANNOTATION_PROMPT_VERSION,
     }
     path = args.work_dir / "run_config.json"
     if path.is_file():
@@ -144,9 +175,8 @@ def verify_project_provenance(rows: Sequence[Mapping[str, Any]], project_dir: Pa
         raise ValueError(f"OpenAI Math project is not a readable Git checkout: {project_dir}") from error
     if dirty:
         raise ValueError("OpenAI Math checkout is dirty; verification must use the extracted source commit")
-    source_commits = {str(row.get("source_commit")) for row in rows}
-    if source_commits != {commit}:
-        raise ValueError(f"input source commit {sorted(source_commits)} does not match checkout commit {commit}")
+    if {str(row.get("source_commit")) for row in rows} != {commit}:
+        raise ValueError("input source commit does not match the OpenAI Math checkout")
     if any(bool(row.get("source_dirty")) for row in rows):
         raise ValueError("input was extracted from a dirty source checkout")
     fingerprint = project_fingerprint(project_dir)
@@ -185,51 +215,54 @@ def baseline_phase(
 
 def generation_phase(
     rows: Sequence[dict[str, Any]],
+    adapters: Sequence[MutationAdapter],
     args: argparse.Namespace,
-    model: Any,
     baseline: JsonlJournal,
     generations: JsonlJournal,
     rejections: JsonlJournal,
 ) -> None:
-    for row in rows:
-        src_hash = row["src_hash"]
-        baseline_record = baseline.get(src_hash)
-        if not baseline_record or baseline_record["status"] != "valid":
+    for job in make_jobs(
+        rows,
+        adapters,
+        attempts_per_mutator=args.attempts_per_mutator,
+        global_seed=args.seed,
+    ):
+        if generations.get(job.job_id) is not None:
             continue
-        for error_type in args.mutation_types:
-            for attempt in range(args.attempts_per_proof):
-                key = mutation_job_id(src_hash, error_type, attempt)
-                if generations.get(key) is not None:
-                    continue
-                try:
-                    pair = mutate_proof(
-                        row,
-                        model=model,
-                        error_type=error_type,
-                        attempt_index=attempt,
-                        global_seed=args.seed,
-                        max_tokens=args.max_tokens,
-                    )
-                except ValueError as error:
-                    rejected: dict[str, Any] = {"job_id": key, "status": "rejected", "reason": str(error)}
-                    if isinstance(error, MutationError) and error.raw_response is not None:
-                        rejected.update({
-                            "raw_response": error.raw_response,
-                            "response_sha256": sha256_text(error.raw_response),
-                            "prompt_version": error.prompt_version,
-                            "user_prompt_sha256": error.prompt_sha256,
-                        })
-                    generations.append(rejected)
-                    record_rejection(rejections, key, "generation", str(error))
-                    continue
-                generated = pair.to_dict()
-                generated.update({
-                    "job_id": key,
-                    "status": "generated",
-                    "incorrect_sha256": sha256_text(pair.incorrect_proof),
-                    "user_prompt_sha256": generated.pop("prompt_sha256"),
-                })
-                generations.append(generated)
+        baseline_record = baseline.get(job.src_hash)
+        if not baseline_record or baseline_record.get("status") != "valid":
+            continue
+        try:
+            pair = job.run()
+            if pair is None:
+                raise ValueError("no_eligible_mutation")
+        except ValueError as error:
+            rejected: dict[str, Any] = {
+                "job_id": job.job_id,
+                "src_hash": job.src_hash,
+                "mutator_id": job.adapter.mutator_id,
+                "error_type": job.adapter.april_error_type,
+                "attempt_index": job.attempt_index,
+                "status": "rejected",
+                "reason": str(error),
+            }
+            raw_response = getattr(error, "raw_response", None)
+            if isinstance(raw_response, str):
+                rejected["raw_response"] = raw_response
+                rejected["response_sha256"] = sha256_text(raw_response)
+            generations.append(rejected)
+            record_rejection(rejections, job.job_id, "generation", str(error))
+            continue
+        generations.append({
+            "job_id": job.job_id,
+            "src_hash": job.src_hash,
+            "mutator_id": job.adapter.mutator_id,
+            "error_type": job.adapter.april_error_type,
+            "attempt_index": job.attempt_index,
+            "status": "generated",
+            "pair": pair,
+            "incorrect_sha256": sha256_text(pair["incorrect_proof"]),
+        })
 
 
 def verification_phase(
@@ -252,11 +285,14 @@ def verification_phase(
             continue
         if owner != key:
             verifications.append({
-                "job_id": key, "status": "rejected", "reason": "duplicate_incorrect_proof", "duplicate_of": owner,
+                "job_id": key,
+                "status": "rejected",
+                "reason": "duplicate_incorrect_proof",
+                "duplicate_of": owner,
             })
             record_rejection(rejections, key, "verification", "duplicate_incorrect_proof")
             continue
-        jobs.append((key, record["incorrect_proof"]))
+        jobs.append((key, record["pair"]["incorrect_proof"]))
     for key, result in verify_parallel(jobs, verifier.verify, args.workers):
         if result.valid:
             verifications.append({"job_id": key, "status": "rejected", "reason": "mutation_compiles"})
@@ -265,7 +301,15 @@ def verification_phase(
             verifications.append({"job_id": key, "status": "rejected", "reason": "missing_structured_proof_state"})
             record_rejection(rejections, key, "verification", "missing_structured_proof_state")
         else:
-            verifications.append({"job_id": key, "status": "accepted_failure", "diagnostic": asdict(result.diagnostic)})
+            verifications.append({
+                "job_id": key,
+                "status": "accepted_failure",
+                "diagnostic": asdict(result.diagnostic),
+            })
+
+
+def messages(system: str, user: str) -> list[dict[str, str]]:
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 def annotation_phase(
@@ -286,7 +330,10 @@ def annotation_phase(
         assert generated is not None
         diagnostic = verified["diagnostic"]
         user = annotation_user_prompt(
-            generated["incorrect_proof"], diagnostic["state_at_error"], diagnostic["error"]
+            generated["pair"]["incorrect_proof"],
+            diagnostic["state_at_error"],
+            diagnostic["line_at_error"],
+            diagnostic["error"],
         )
         raw_responses = list(existing.get("raw_responses", [])) if existing else []
         parsed: dict[str, str] | None = None
@@ -300,11 +347,17 @@ def annotation_phase(
             except ValueError as error:
                 parse_error = str(error)
                 annotations.append({
-                    "job_id": key, "status": "retrying", "reason": parse_error, "raw_responses": raw_responses,
+                    "job_id": key,
+                    "status": "retrying",
+                    "reason": parse_error,
+                    "raw_responses": raw_responses,
                 })
         if parsed is None:
             annotations.append({
-                "job_id": key, "status": "rejected", "reason": parse_error, "raw_responses": raw_responses,
+                "job_id": key,
+                "status": "rejected",
+                "reason": parse_error,
+                "raw_responses": raw_responses,
             })
             record_rejection(rejections, key, "annotation", parse_error)
             continue
@@ -313,11 +366,6 @@ def annotation_phase(
             "status": "annotated",
             **parsed,
             "raw_responses": raw_responses,
-            "response_sha256": sha256_text(raw_responses[-1]),
-            "prompt_version": ANNOTATION_PROMPT_VERSION,
-            "system_prompt": ANNOTATION_SYSTEM_PROMPT,
-            "user_prompt_sha256": sha256_text(user),
-            "attempts": len(raw_responses),
         })
 
 
@@ -328,6 +376,20 @@ def package_version(distribution: str) -> str | None:
         return None
 
 
+def mutator_manifest(mutator_id: str) -> dict[str, Any]:
+    descriptor = MUTATOR_DESCRIPTORS[mutator_id]
+    values = dict(manifest_metadata(mutator_id))
+    template = values.pop("prompt_template", None)
+    system = values.pop("system_prompt", None)
+    if isinstance(template, str) and isinstance(system, str):
+        values["prompt_sha256"] = sha256_text(system + "\0" + template)
+    return {
+        "april_error_type": descriptor["april_error_type"],
+        "requires_model": descriptor["requires_model"],
+        **values,
+    }
+
+
 def export_outputs(
     rows: Sequence[dict[str, Any]],
     args: argparse.Namespace,
@@ -336,17 +398,11 @@ def export_outputs(
     annotations: JsonlJournal,
     baseline: JsonlJournal,
     rejections: JsonlJournal,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     originals = {row["src_hash"]: row for row in rows}
-    provenance = AprilProvenance(
-        model=args.model,
-        endpoint=sanitize_endpoint(endpoint_from_args(args)),
-        attempts_per_proof=args.attempts_per_proof,
-        max_tokens=args.max_tokens,
-        annotation_max_tokens=args.annotation_max_tokens,
-        reasoning_effort=args.reasoning_effort,
-    )
-    outputs: dict[str, list[dict[str, Any]]] = {"lme": [], "mlme": []}
+    configured_types = sorted({MUTATOR_DESCRIPTORS[name]["april_error_type"] for name in args.mutators})
+    outputs: dict[str, list[dict[str, Any]]] = {error_type: [] for error_type in configured_types}
+    accepted_by_mutator = {name: 0 for name in args.mutators}
     for key, generated in generations.records.items():
         verified, annotated = verifications.get(key), annotations.get(key)
         if (
@@ -356,58 +412,110 @@ def export_outputs(
         ):
             continue
         original = originals.get(generated["src_hash"])
-        if original is not None:
-            outputs[generated["error_type"]].append(
-                format_april_record(original, generated, verified, annotated, provenance)
-            )
+        if original is None:
+            continue
+        error_type = generated["error_type"]
+        outputs.setdefault(error_type, []).append(format_april_record(
+            original,
+            generated["pair"],
+            error_type=error_type,
+            verification=verified,
+            annotation=annotated,
+        ))
+        accepted_by_mutator[generated["mutator_id"]] += 1
     for values in outputs.values():
-        values.sort(key=lambda value: value["selected_id"])
+        values.sort(key=lambda value: (value["src_hash"], sha256_text(value["incorrect_proof"])))
     output_hashes = {
-        error_type: atomic_jsonl(args.output_dir / f"{error_type}.jsonl", outputs[error_type])
-        for error_type in ("lme", "mlme")
+        error_type: atomic_jsonl(args.output_dir / f"{error_type}.jsonl", values)
+        for error_type, values in outputs.items()
     }
-    counts = {
+    counts: dict[str, Any] = {
         "input_records": len(rows),
         "baseline_valid": sum(record.get("status") == "valid" for record in baseline.records.values()),
         "baseline_rejected": sum(record.get("status") == "rejected" for record in baseline.records.values()),
-        "lme_accepted": len(outputs["lme"]),
-        "mlme_accepted": len(outputs["mlme"]),
         "generated": sum(record.get("status") == "generated" for record in generations.records.values()),
         "generation_rejected": sum(record.get("status") == "rejected" for record in generations.records.values()),
         "accepted_failures": sum(record.get("status") == "accepted_failure" for record in verifications.records.values()),
         "verification_rejected": sum(record.get("status") == "rejected" for record in verifications.records.values()),
         "annotated": sum(record.get("status") == "annotated" for record in annotations.records.values()),
         "annotation_rejected": sum(record.get("status") == "rejected" for record in annotations.records.values()),
+        "accepted_by_mutator": accepted_by_mutator,
+        "accepted_by_error_type": {key: len(value) for key, value in outputs.items()},
     }
+    counts["by_mutator"] = {}
+    for mutator_id in args.mutators:
+        generated_for_mutator = [
+            record
+            for record in generations.records.values()
+            if record.get("mutator_id") == mutator_id
+        ]
+        job_ids = {record["job_id"] for record in generated_for_mutator}
+        verified_for_mutator = [
+            verifications.get(key) for key in job_ids if verifications.get(key) is not None
+        ]
+        annotated_for_mutator = [
+            annotations.get(key) for key in job_ids if annotations.get(key) is not None
+        ]
+        counts["by_mutator"][mutator_id] = {
+            "generated": sum(record.get("status") == "generated" for record in generated_for_mutator),
+            "generation_rejected": sum(
+                record.get("status") == "rejected" for record in generated_for_mutator
+            ),
+            "accepted_failures": sum(
+                record and record.get("status") == "accepted_failure"
+                for record in verified_for_mutator
+            ),
+            "verification_rejected": sum(
+                record and record.get("status") == "rejected"
+                for record in verified_for_mutator
+            ),
+            "annotated": sum(
+                record and record.get("status") == "annotated"
+                for record in annotated_for_mutator
+            ),
+            "annotation_rejected": sum(
+                record and record.get("status") == "rejected"
+                for record in annotated_for_mutator
+            ),
+            "exported": accepted_by_mutator[mutator_id],
+        }
     rejection_counts: dict[str, int] = {}
     for rejection in rejections.records.values():
         label = f"{rejection.get('phase')}:{rejection.get('reason')}"
         rejection_counts[label] = rejection_counts.get(label, 0) + 1
-    lme_template = lme_user_prompt("{broken_proof}")
-    mlme_template = mlme_user_prompt("{broken_proof}")
-    annotation_template = annotation_user_prompt("{incorrect_proof}", "{state_at_error}", "{error}")
+    loaded_model_metadata = model_metadata(args)
+    annotation_template = annotation_user_prompt(
+        "{incorrect_proof}",
+        "{state_at_error}",
+        "{line_at_error}",
+        "{error}",
+    )
     manifest = {
-        "protocol": "openai-math-line-mutations-v1",
+        "protocol": "openai-math-generic-mutations-v2",
         "input": str(args.input),
         "input_sha256": sha256_bytes(args.input.read_bytes()),
         "input_records": len(rows),
-        "selected_theorems": sorted(row["theorem"] for row in rows),
+        "selected_theorems": sorted(str(row["theorem"]) for row in rows),
         "source_commits": sorted({str(row.get("source_commit")) for row in rows}),
         "source_file_sha256": sorted({str(row.get("file_sha256")) for row in rows}),
-        "source_dirty_values": sorted({bool(row.get("source_dirty")) for row in rows}),
         "lean_toolchains": sorted({str(row.get("lean_toolchain")) for row in rows}),
         "verifier_fingerprints": sorted({str(row.get("verifier_fingerprint")) for row in rows}),
         "project_dir": str(args.project_dir),
         "verified_project": getattr(args, "verified_project", None),
         "lean_interact_version": package_version("lean-interact"),
         "openai_python_version": package_version("openai"),
-        "model": args.model,
+        "transformers_version": package_version("transformers"),
+        "torch_version": package_version("torch"),
+        "model": loaded_model_metadata,
         "paper_faithful_model": args.model == PAPER_MODEL,
-        "endpoint": sanitize_endpoint(endpoint_from_args(args)),
         "seed": args.seed,
-        "attempts_per_proof": args.attempts_per_proof,
-        "mutation_types": list(args.mutation_types),
-        "protocol_deviations": provenance.protocol_deviations,
+        "seed_derivation": SEED_DERIVATION_VERSION,
+        "attempts_per_mutator": args.attempts_per_mutator,
+        "mutators": {name: mutator_manifest(name) for name in args.mutators},
+        "annotation_prompt": {
+            "version": ANNOTATION_PROMPT_VERSION,
+            "sha256": sha256_text(ANNOTATION_SYSTEM_PROMPT + "\0" + annotation_template),
+        },
         "sampling": {
             "temperature": None,
             "reasoning_effort": args.reasoning_effort,
@@ -416,21 +524,6 @@ def export_outputs(
             "annotation_retries": args.annotation_retries,
         },
         "verification": {"workers": args.workers, "timeout_seconds": args.lean_timeout},
-        "prompts": {
-            "lme": {
-                "version": LME_PROMPT_VERSION, "system": SYSTEM_PROMPT, "template": lme_template,
-                "sha256": sha256_text(SYSTEM_PROMPT + "\0" + lme_template),
-            },
-            "mlme": {
-                "version": MLME_PROMPT_VERSION, "system": SYSTEM_PROMPT, "template": mlme_template,
-                "sha256": sha256_text(SYSTEM_PROMPT + "\0" + mlme_template),
-            },
-            "annotation": {
-                "version": ANNOTATION_PROMPT_VERSION, "system": ANNOTATION_SYSTEM_PROMPT,
-                "template": annotation_template,
-                "sha256": sha256_text(ANNOTATION_SYSTEM_PROMPT + "\0" + annotation_template),
-            },
-        },
         "output_sha256": output_hashes,
         "counts": counts,
         "rejections_by_phase_and_reason": dict(sorted(rejection_counts.items())),
@@ -444,22 +537,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", type=Path, default=default_openai_math_input(REPO_ROOT))
     parser.add_argument("--project-dir", type=Path, default=Path("external/openai-math/lean"))
     parser.add_argument("--output-dir", type=Path, default=Path("contributions/openai-math-line-mutations"))
-    parser.add_argument("--work-dir", type=Path, default=Path("runs/openai_math_line_mutations"))
-    parser.add_argument("--mutation-types", nargs="+", choices=("lme", "mlme"), default=("lme", "mlme"))
+    parser.add_argument("--work-dir", type=Path, default=Path("runs/openai_math_mutations"))
+    parser.add_argument(
+        "--mutators",
+        nargs="+",
+        choices=tuple(MUTATOR_DESCRIPTORS),
+        default=DEFAULT_MUTATORS,
+    )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--attempts-per-proof", type=int, default=1)
-    parser.add_argument("--limit", type=int, help="Pilot limit applied before verification or API calls")
+    parser.add_argument("--attempts-per-mutator", type=int, default=1)
+    parser.add_argument("--limit", type=int, help="Pilot limit applied before verification or model calls")
     parser.add_argument("--theorem", action="append", default=[], help="Only process this theorem; repeatable")
     parser.add_argument("--workers", type=int, default=1, help="Concurrent Lean-Interact servers")
     parser.add_argument("--lean-timeout", type=float, default=120.0)
-    parser.add_argument("--model", default=DEFAULT_OPENAI_MODEL)
+    parser.add_argument("--model-provider", choices=("openai", "huggingface"), default="openai")
+    parser.add_argument("--model")
+    parser.add_argument("--hf-device", choices=("auto", "mps", "cuda", "cpu"), default="auto")
+    parser.add_argument("--hf-revision", default="main")
     parser.add_argument("--base-url", help="OpenAI-compatible endpoint; overrides --base-url-env")
     parser.add_argument("--base-url-env", default="OPENAI_BASE_URL")
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
     parser.add_argument("--api-timeout", type=float, default=180.0)
     parser.add_argument("--api-retries", type=int, default=3)
     parser.add_argument(
-        "--reasoning-effort", choices=("none", "low", "medium", "high", "xhigh", "max"), default="medium"
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high", "xhigh", "max"),
+        default="medium",
     )
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--annotation-max-tokens", type=int, default=512)
@@ -468,14 +571,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.attempts_per_proof < 1:
-        raise ValueError("--attempts-per-proof must be at least 1")
+    if args.model is None:
+        args.model = DEFAULT_HUGGINGFACE_MODEL if args.model_provider == "huggingface" else DEFAULT_OPENAI_MODEL
+    if args.attempts_per_mutator < 1:
+        raise ValueError("--attempts-per-mutator must be at least 1")
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
     if args.limit is not None and args.limit < 1:
         raise ValueError("--limit must be at least 1")
-    if not args.model.strip():
-        raise ValueError("--model must be nonempty")
+    if len(set(args.mutators)) != len(args.mutators):
+        raise ValueError("--mutators may not contain duplicates")
     if not args.input.is_file():
         raise ValueError(f"input does not exist: {args.input}")
     if not args.project_dir.is_dir():
@@ -487,7 +592,8 @@ def run_pipeline(
     *,
     model: Any | None = None,
     verifier_pool: VerifierPool | None = None,
-) -> dict[str, int]:
+    adapters: Sequence[MutationAdapter] | None = None,
+) -> dict[str, Any]:
     validate_args(args)
     args.input = args.input.resolve()
     args.project_dir = args.project_dir.resolve()
@@ -498,7 +604,30 @@ def run_pipeline(
     args.verified_project = verify_project_provenance(rows, args.project_dir) if using_real_verifier else None
     ensure_run_config(args, rows)
 
-    def make_model() -> OpenAIModel:
+    def make_model() -> Any:
+        if args.model_provider == "huggingface":
+            local_model = HuggingFaceLocalModel(
+                model=args.model,
+                device=args.hf_device,
+                revision=args.hf_revision,
+            )
+            atomic_json(args.work_dir / "model_metadata.json", {
+                "provider": args.model_provider,
+                "model": args.model,
+                "endpoint": "local",
+                "requested_revision": args.hf_revision,
+                "resolved_revision": local_model.revision,
+                "device": local_model.device,
+            })
+            return local_model
+        atomic_json(args.work_dir / "model_metadata.json", {
+            "provider": args.model_provider,
+            "model": args.model,
+            "endpoint": model_endpoint(args),
+            "requested_revision": None,
+            "resolved_revision": None,
+            "device": None,
+        })
         return OpenAIModel(
             model=args.model,
             base_url=endpoint_from_args(args),
@@ -517,26 +646,21 @@ def run_pipeline(
     annotations = JsonlJournal(args.work_dir / "annotations.jsonl", "job_id")
     rejections = JsonlJournal(args.work_dir / "rejections.jsonl", "job_id")
 
-    generation_requested = any(
-        generations.get(mutation_job_id(row["src_hash"], error_type, attempt)) is None
-        for row in rows
-        for error_type in args.mutation_types
-        for attempt in range(args.attempts_per_proof)
-    )
-    if generation_requested and model is None:
-        model = make_model()  # Fail on missing credentials before expensive Lean startup.
     baseline_phase(rows, args, verifier_pool, baseline, rejections)
-    generation_pending = any(
-        baseline.get(row["src_hash"]) is not None
-        and baseline.get(row["src_hash"])["status"] == "valid"
-        and generations.get(mutation_job_id(row["src_hash"], error_type, attempt)) is None
+    pending_ids = [key for key in expected_job_ids(rows, args) if generations.get(key) is None]
+    generation_pending = bool(pending_ids) and any(
+        baseline.get(row["src_hash"]) and baseline.get(row["src_hash"])["status"] == "valid"
         for row in rows
-        for error_type in args.mutation_types
-        for attempt in range(args.attempts_per_proof)
     )
     if generation_pending:
-        assert model is not None
-        generation_phase(rows, args, model, baseline, generations, rejections)
+        if adapters is None:
+            needs_model = any(MUTATOR_DESCRIPTORS[name]["requires_model"] for name in args.mutators)
+            if needs_model:
+                model = model or make_model()
+            adapters = [build_adapter(name, model=model, max_tokens=args.max_tokens) for name in args.mutators]
+        elif tuple(adapter.mutator_id for adapter in adapters) != tuple(args.mutators):
+            raise ValueError("injected adapters must match --mutators in the same order")
+        generation_phase(rows, adapters, args, baseline, generations, rejections)
     verification_phase(args, verifier_pool, generations, verifications, rejections)
     annotation_pending = any(
         verified.get("status") == "accepted_failure"

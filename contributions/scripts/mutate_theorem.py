@@ -11,12 +11,14 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 
 try:
-    from .mutate_line import byte_to_char_index, derived_seed, mask_lean_source
+    from .mutate_line import byte_to_char_index, mask_lean_source
     from .mutate_tactic import HEAD_PREFIX, TACTIC_CLASSES
+    from .mutation_orchestrator import derive_seed as derived_seed
     from .mutation_utils import require_string
 except ImportError:  # Support direct execution from contributions/scripts.
-    from mutate_line import byte_to_char_index, derived_seed, mask_lean_source
+    from mutate_line import byte_to_char_index, mask_lean_source
     from mutate_tactic import HEAD_PREFIX, TACTIC_CLASSES
+    from mutation_orchestrator import derive_seed as derived_seed
     from mutation_utils import require_string
 
 

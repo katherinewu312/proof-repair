@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_OPENAI_MODEL = "gpt-6-luna"
+DEFAULT_HUGGINGFACE_MODEL = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
 PAPER_MODEL = "deepseek-ai/DeepSeek-V3-0324"
 DEFAULT_OPENAI_ENDPOINT = "https://api.openai.com/v1"
 
@@ -86,4 +88,83 @@ class OpenAIModel:
         content = response.output_text
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("model returned an empty completion")
+        return content
+
+
+class HuggingFaceLocalModel:
+    """Run an instruction-tuned Hugging Face model in the current process."""
+
+    def __init__(
+        self,
+        *,
+        model: str = DEFAULT_HUGGINGFACE_MODEL,
+        device: str = "auto",
+        revision: str = "main",
+    ) -> None:
+        try:
+            import torch
+            from huggingface_hub import try_to_load_from_cache
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as error:
+            raise RuntimeError(
+                "install torch, transformers, and accelerate to use a local model"
+            ) from error
+
+        if device == "auto":
+            if torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+        if device not in {"mps", "cuda", "cpu"}:
+            raise ValueError(f"unsupported Hugging Face device: {device}")
+
+        dtype = {
+            "mps": torch.float16,
+            "cuda": torch.bfloat16,
+            "cpu": torch.float32,
+        }[device]
+        self.model_name = model
+        self.device = device
+        self.requested_revision = revision
+        self.tokenizer = AutoTokenizer.from_pretrained(model, revision=revision)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model,
+            revision=revision,
+            dtype=dtype,
+            low_cpu_mem_usage=True,
+        ).to(device)
+        self.model.eval()
+        cached_config = try_to_load_from_cache(model, "config.json", revision=revision)
+        self.revision = (
+            Path(cached_config).parent.name
+            if isinstance(cached_config, str)
+            else getattr(self.model.config, "_commit_hash", None)
+        )
+
+    def complete(self, messages: Sequence[Mapping[str, str]], max_tokens: int) -> str:
+        import torch
+
+        prompt = self.tokenizer.apply_chat_template(
+            [dict(message) for message in messages],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        encoded = self.tokenizer(prompt, return_tensors="pt")
+        encoded = {key: value.to(self.device) for key, value in encoded.items()}
+        input_tokens = encoded["input_ids"].shape[-1]
+        with torch.inference_mode():
+            generated = self.model.generate(
+                **encoded,
+                max_new_tokens=max_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        content = self.tokenizer.decode(
+            generated[0, input_tokens:],
+            skip_special_tokens=True,
+        ).strip()
+        if not content:
+            raise RuntimeError("local Hugging Face model returned an empty completion")
         return content

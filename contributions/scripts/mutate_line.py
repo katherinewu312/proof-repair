@@ -1,9 +1,7 @@
-"""Create line-mutated proof pairs from a proof dataset.
-"""
+"""Generate pair-only line and suffix mutations for Lean proofs."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import hashlib
+from dataclasses import dataclass
 import random
 import re
 import textwrap
@@ -43,21 +41,6 @@ class MutationError(ValueError):
 
 
 @dataclass(frozen=True)
-class MutationConfig:
-    mutation_types: tuple[str, ...] = ("lme", "mlme")
-    attempts_per_proof: int = 1
-    global_seed: int = 0
-    max_tokens: int = 2048
-
-    def __post_init__(self) -> None:
-        if self.attempts_per_proof < 1:
-            raise ValueError("attempts_per_proof must be at least 1")
-        invalid = set(self.mutation_types) - {"lme", "mlme"}
-        if invalid:
-            raise ValueError(f"unsupported mutation types: {sorted(invalid)}")
-
-
-@dataclass(frozen=True)
 class ProofLayout:
     proof_start: int
     proof_end: int
@@ -80,36 +63,6 @@ class Redaction:
     redacted_end_line: int
     redacted_code_lines: int
     eligible_locations: int
-
-
-@dataclass(frozen=True)
-class MutationPair:
-    """One correct proof and its generated incorrect counterpart."""
-
-    correct_proof: str
-    incorrect_proof: str
-    src_hash: str
-    error_type: str
-    attempt_index: int
-    global_seed: int
-    derived_seed: int
-    prompt_version: str
-    prompt_sha256: str
-    response_sha256: str
-    raw_response: str
-    redaction: Redaction
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a neutral mutation record, not an APRIL-formatted example."""
-        value = asdict(self)
-        value["redaction"].pop("redacted_proof", None)
-        return value
-
-
-def derived_seed(global_seed: int, src_hash: str, error_type: str, attempt_index: int) -> int:
-    """Derive an order-independent 64-bit seed for exactly one attempt."""
-    material = f"{global_seed}\0{src_hash}\0{error_type}\0{attempt_index}".encode()
-    return int.from_bytes(hashlib.sha256(material).digest()[:8], "big")
 
 
 def byte_to_char_index(text: str, byte_offset: int) -> int:
@@ -224,12 +177,12 @@ def indentation(value: str) -> str:
     return value[:len(value) - len(value.lstrip(" \t"))]
 
 
-def make_lme_redaction(record: Mapping[str, Any], seed: int) -> Redaction:
+def make_lme_redaction(record: Mapping[str, Any], rng: random.Random) -> Redaction:
     source = require_string(record, "correct_proof")
     layout = proof_layout(record)
     if not layout.code_lines:
         raise ValueError("target proof has no eligible nonblank line after `by`")
-    selected = random.Random(seed).choice(layout.code_lines)
+    selected = rng.choice(layout.code_lines)
     start, content_end, _ = layout.lines[selected]
     replace_end = min(content_end, layout.proof_end)
     base_indent = indentation(source[start:replace_end])
@@ -255,13 +208,13 @@ def mlme_cutoffs(record: Mapping[str, Any]) -> list[tuple[int, int, int]]:
     return candidates
 
 
-def make_mlme_redaction(record: Mapping[str, Any], seed: int) -> Redaction:
+def make_mlme_redaction(record: Mapping[str, Any], rng: random.Random) -> Redaction:
     source = require_string(record, "correct_proof")
     layout = proof_layout(record)
     candidates = mlme_cutoffs(record)
     if not candidates:
         raise ValueError("target proof needs at least two nonblank body lines for MLME")
-    cutoff, first_removed, removed = random.Random(seed).choice(candidates)
+    cutoff, first_removed, removed = rng.choice(candidates)
     replace_start = layout.lines[cutoff][2]
     if replace_start > layout.proof_end:
         raise ValueError("MLME cutoff falls outside proof_span")
@@ -383,22 +336,23 @@ def mutate_proof(
     *,
     model: CompletionModel,
     error_type: str,
-    attempt_index: int = 0,
-    global_seed: int = 0,
+    rng: random.Random,
     max_tokens: int = 2048,
-) -> MutationPair:
-    """Generate one mutation pair from one proof record."""
+) -> dict[str, str]:
+    """Generate exactly one unverified correct/incorrect proof pair."""
     if error_type not in {"lme", "mlme"}:
         raise ValueError(f"unsupported mutation type: {error_type}")
     correct = require_string(record, "correct_proof")
-    src_hash = require_string(record, "src_hash")
     contains_admission = record.get("contains_sorry_or_admit")
     if not isinstance(contains_admission, bool):
         raise ValueError("contains_sorry_or_admit must be supplied by extraction")
     if contains_admission:
         raise ValueError("target_contains_sorry_or_admit")
-    seed = derived_seed(global_seed, src_hash, error_type, attempt_index)
-    redaction = make_lme_redaction(record, seed) if error_type == "lme" else make_mlme_redaction(record, seed)
+    redaction = (
+        make_lme_redaction(record, rng)
+        if error_type == "lme"
+        else make_mlme_redaction(record, rng)
+    )
     system, user, version = prompt_for(redaction)
     response = model.complete(messages(system, user), max_tokens)
     try:
@@ -415,46 +369,25 @@ def mutate_proof(
             prompt_version=version,
             prompt_sha256=sha256_text(user),
         ) from error
-    return MutationPair(
-        correct_proof=correct,
-        incorrect_proof=incorrect,
-        src_hash=src_hash,
-        error_type=error_type,
-        attempt_index=attempt_index,
-        global_seed=global_seed,
-        derived_seed=seed,
-        prompt_version=version,
-        prompt_sha256=sha256_text(user),
-        response_sha256=sha256_text(response),
-        raw_response=response,
-        redaction=redaction,
-    )
+    return {"correct_proof": correct, "incorrect_proof": incorrect}
 
 
 def mutate_dataset(
     proofs: Sequence[Mapping[str, Any]],
     *,
     model: CompletionModel,
-    config: MutationConfig | None = None,
-) -> list[MutationPair]:
-    """Return correct/incorrect proof pairs for every configured dataset attempt.
-
-    Invalid records and malformed model responses raise ``ValueError``. The
-    contribution pipeline calls ``mutate_proof`` individually so it can journal
-    those failures; this neutral batch API intentionally has no persistence or
-    dataset-format policy.
-    """
-    config = config or MutationConfig()
+    error_type: str,
+    rng: random.Random,
+    max_tokens: int = 2048,
+) -> list[dict[str, str]]:
+    """Generate one pair per input using caller-owned randomness."""
     return [
         mutate_proof(
             proof,
             model=model,
             error_type=error_type,
-            attempt_index=attempt,
-            global_seed=config.global_seed,
-            max_tokens=config.max_tokens,
+            rng=rng,
+            max_tokens=max_tokens,
         )
         for proof in proofs
-        for error_type in config.mutation_types
-        for attempt in range(config.attempts_per_proof)
     ]

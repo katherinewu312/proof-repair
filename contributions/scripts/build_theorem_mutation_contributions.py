@@ -26,7 +26,7 @@ try:
         parse_theorem_annotation,
         theorem_annotation_user_prompt,
     )
-    from .build_line_mutation_contributions import (
+    from .build_mutation_contributions import (
         endpoint_from_args,
         package_version,
         record_rejection,
@@ -76,7 +76,7 @@ except ImportError:  # Support direct execution from contributions/scripts.
         parse_theorem_annotation,
         theorem_annotation_user_prompt,
     )
-    from build_line_mutation_contributions import (
+    from build_mutation_contributions import (
         endpoint_from_args,
         package_version,
         record_rejection,
