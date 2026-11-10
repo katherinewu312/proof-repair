@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -48,12 +48,29 @@ class OpenAIModel:
         self.client = OpenAI(**kwargs)
 
     def complete(self, messages: Sequence[Mapping[str, str]], max_tokens: int) -> str:
+        return self._create(input=list(messages), max_output_tokens=max_tokens)
+
+    def complete_json(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        schema: Mapping[str, Any],
+        max_tokens: int,
+        *,
+        name: str = "response",
+    ) -> str:
+        """Structured output; returns the raw JSON text."""
+        return self._create(
+            input=list(messages),
+            max_output_tokens=max_tokens,
+            text={"format": {"type": "json_schema", "name": name, "schema": dict(schema), "strict": True}},
+        )
+
+    def _create(self, **request: Any) -> str:
         try:
             response = self.client.responses.create(
                 model=self.model,
-                input=list(messages),
-                max_output_tokens=max_tokens,
                 reasoning={"effort": self.reasoning_effort},
+                **request,
             )
         except Exception as error:
             # Surface only stable API metadata. Avoid dumping response headers or

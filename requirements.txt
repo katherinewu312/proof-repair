@@ -6,3 +6,4 @@ huggingface_hub[cli]>=0.30,<2
 PyYAML>=6,<7
 openai>=2,<3
 lean-interact==0.11.6
+lean-explore==1.3.0
